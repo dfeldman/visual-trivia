@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>State Capitals Game with PoseNet</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/posenet"></script>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            overflow: hidden;
+        }
+        #output-canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+        }
+        .corner {
+            position: absolute;
+            width: 150px;
+            height: 150px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            font-size: 24px;
+            background-color: rgba(255, 255, 255, 0.7);
+            text-align: center;
+            transition: background-color 0.3s;
+        }
+        #top-left { top: 10px; left: 10px; }
+        #top-right { top: 10px; right: 10px; }
+        #bottom-left { bottom: 10px; left: 10px; }
+        #bottom-right { bottom: 10px; right: 10px; }
+        #question {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 48px;
+            color: white;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.5);
+            text-align: center;
+        }
+        #score {
+            position: absolute;
+            top: 10px;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 24px;
+            color: white;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.5);
+        }
+        #feedback {
+            position: absolute;
+            top: 60%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 36px;
+            color: white;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.5);
+        }
+    </style>
+</head>
+<body>
+    <canvas id="output-canvas"></canvas>
+    <video id="video" width="640" height="480" autoplay style="display: none;"></video>
+    <div id="score">Score: 0</div>
+    <div id="question"></div>
+    <div id="feedback"></div>
+    <div id="top-left" class="corner"></div>
+    <div id="top-right" class="corner"></div>
+    <div id="bottom-left" class="corner"></div>
+    <div id="bottom-right" class="corner"></div>
+
+    <script>
+        let score = 0;
+        let correctAnswer;
+        let net;
+        let video;
+        let canvas;
+        let ctx;
+        let corners;
+        let cooldownActive = false;
+
+        const stateCapitals = {
+            "Alabama": "Montgomery", "Alaska": "Juneau", "Arizona": "Phoenix", "Arkansas": "Little Rock",
+            "California": "Sacramento", "Colorado": "Denver", "Connecticut": "Hartford", "Delaware": "Dover",
+            "Florida": "Tallahassee", "Georgia": "Atlanta", "Hawaii": "Honolulu", "Idaho": "Boise",
+            "Illinois": "Springfield", "Indiana": "Indianapolis", "Iowa": "Des Moines", "Kansas": "Topeka",
+            "Kentucky": "Frankfort", "Louisiana": "Baton Rouge", "Maine": "Augusta", "Maryland": "Annapolis",
+            "Massachusetts": "Boston", "Michigan": "Lansing", "Minnesota": "St. Paul", "Mississippi": "Jackson",
+            "Missouri": "Jefferson City", "Montana": "Helena", "Nebraska": "Lincoln", "Nevada": "Carson City",
+            "New Hampshire": "Concord", "New Jersey": "Trenton", "New Mexico": "Santa Fe", "New York": "Albany",
+            "North Carolina": "Raleigh", "North Dakota": "Bismarck", "Ohio": "Columbus", "Oklahoma": "Oklahoma City",
+            "Oregon": "Salem", "Pennsylvania": "Harrisburg", "Rhode Island": "Providence", "South Carolina": "Columbia",
+            "South Dakota": "Pierre", "Tennessee": "Nashville", "Texas": "Austin", "Utah": "Salt Lake City",
+            "Vermont": "Montpelier", "Virginia": "Richmond", "Washington": "Olympia", "West Virginia": "Charleston",
+            "Wisconsin": "Madison", "Wyoming": "Cheyenne"
+        };
+
+        function logError(message) {
+            console.error(`Error: ${message}`);
+        }
+
+        function logInfo(message) {
+            console.log(`Info: ${message}`);
+        }
+
+        async function setupCamera() {
+            video = document.getElementById('video');
+            if (!video) {
+                throw new Error("Video element not found");
+            }
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
+                video.srcObject = stream;
+                return new Promise((resolve) => {
+                    video.onloadedmetadata = () => {
+                        video.play();
+                        resolve(video);
+                    };
+                });
+            } catch (error) {
+                throw new Error(`Camera setup failed: ${error.message}`);
+            }
+        }
+
+        async function loadPoseNet() {
+            try {
+                net = await posenet.load({
+                    architecture: 'MobileNetV1',
+                    outputStride: 16,
+                    inputResolution: { width: 640, height: 480 },
+                    multiplier: 0.75,
+                    quantBytes: 2
+                });
+                logInfo("PoseNet loaded successfully");
+            } catch (error) {
+                throw new Error(`PoseNet loading failed: ${error.message}`);
+            }
+        }
+
+        function generateQuestion() {
+            const states = Object.keys(stateCapitals);
+            const questionState = states[Math.floor(Math.random() * states.length)];
+            correctAnswer = stateCapitals[questionState];
+
+            const questionElement = document.getElementById('question');
+            if (questionElement) {
+                questionElement.textContent = `What is the capital of ${questionState}?`;
+            } else {
+                logError("Question element not found");
+            }
+
+            const answers = [correctAnswer];
+            while (answers.length < 4) {
+                const wrongAnswer = stateCapitals[states[Math.floor(Math.random() * states.length)]];
+                if (!answers.includes(wrongAnswer)) {
+                    answers.push(wrongAnswer);
+                }
+            }
+            answers.sort(() => Math.random() - 0.5);
+
+            ['top-left', 'top-right', 'bottom-left', 'bottom-right'].forEach((id, index) => {
+                const element = document.getElementById(id);
+                if (element) {
+                    element.textContent = answers[index];
+                    element.style.backgroundColor = 'rgba(255, 255, 255, 0.7)';
+                } else {
+                    logError(`Corner element ${id} not found`);
+                }
+            });
+        }
+
+        function isHandNearCorner(hand, corner) {
+            const dx = hand.x - corner.x;
+            const dy = hand.y - corner.y;
+            return Math.sqrt(dx*dx + dy*dy) < 100;
+        }
+
+        function checkAnswer(cornerElement) {
+            if (cooldownActive) return;
+
+            const feedbackElement = document.getElementById('feedback');
+            if (cornerElement) {
+                cornerElement.style.backgroundColor = 'rgba(255, 255, 0, 0.7)'; // Highlight selected answer
+                if (cornerElement.textContent === correctAnswer) {
+                    score++;
+                    const scoreElement = document.getElementById('score');
+                    if (scoreElement) {
+                        scoreElement.textContent = `Score: ${score}`;
+                    } else {
+                        logError("Score element not found");
+                    }
+                    feedbackElement.textContent = "Correct!";
+                } else {
+                    feedbackElement.textContent = `Incorrect! The correct answer is ${correctAnswer}.`;
+                }
+            }
+
+            cooldownActive = true;
+            let countdown = 5;
+            const countdownInterval = setInterval(() => {
+                countdown--;
+                feedbackElement.textContent += ` Next question in ${countdown}...`;
+                if (countdown <= 0) {
+                    clearInterval(countdownInterval);
+                    feedbackElement.textContent = "";
+                    cooldownActive = false;
+                    generateQuestion();
+                }
+            }, 1000);
+        }
+
+        async function detectPose() {
+            if (!net || !video || !ctx) {
+                logError("Required elements for pose detection not initialized");
+                return;
+            }
+
+            try {
+                const pose = await net.estimateSinglePose(video, {
+                    flipHorizontal: false,
+                    decodingMethod: 'single-person'
+                });
+
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                ctx.save();
+                ctx.scale(-1, 1);
+                ctx.translate(-canvas.width, 0);
+                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                ctx.restore();
+
+                if (pose.score >= 0.1) {
+                    // Draw keypoints
+                    pose.keypoints.forEach((keypoint) => {
+                        if (keypoint.score > 0.2) {
+                            const { y, x } = keypoint.position;
+                            ctx.beginPath();
+                            ctx.arc(canvas.width - x, y, 5, 0, 2 * Math.PI);
+                            ctx.fillStyle = 'aqua';
+                            ctx.fill();
+                            ctx.fillStyle = 'white';
+                            ctx.fillText(keypoint.part, canvas.width - x + 5, y - 5);
+                        }
+                    });
+
+                    // Draw skeleton
+                    const adjacentKeyPoints = posenet.getAdjacentKeyPoints(pose.keypoints, 0.2);
+                    adjacentKeyPoints.forEach((keypoints) => {
+                        drawSegment(
+                            { x: canvas.width - keypoints[0].position.x, y: keypoints[0].position.y },
+                            { x: canvas.width - keypoints[1].position.x, y: keypoints[1].position.y },
+                            'aqua'
+                        );
+                    });
+
+                    const leftWrist = pose.keypoints.find(k => k.part === 'leftWrist');
+                    const rightWrist = pose.keypoints.find(k => k.part === 'rightWrist');
+
+                    if (leftWrist && leftWrist.score > 0.2) {
+                        drawWrist(canvas.width - leftWrist.position.x, leftWrist.position.y, 'yellow');
+                        Object.entries(corners).forEach(([id, corner]) => {
+                            if (isHandNearCorner({ x: canvas.width - leftWrist.position.x, y: leftWrist.position.y }, corner)) {
+                                checkAnswer(document.getElementById(id));
+                            }
+                        });
+                    }
+
+                    if (rightWrist && rightWrist.score > 0.2) {
+                        drawWrist(canvas.width - rightWrist.position.x, rightWrist.position.y, 'green');
+                        Object.entries(corners).forEach(([id, corner]) => {
+                            if (isHandNearCorner({ x: canvas.width - rightWrist.position.x, y: rightWrist.position.y }, corner)) {
+                                checkAnswer(document.getElementById(id));
+                            }
+                        });
+                    }
+                }
+            } catch (error) {
+                logError(`Pose detection failed: ${error.message}`);
+            }
+
+            requestAnimationFrame(detectPose);
+        }
+
+        function drawSegment(startPoint, endPoint, color) {
+            ctx.beginPath();
+            ctx.moveTo(startPoint.x, startPoint.y);
+            ctx.lineTo(endPoint.x, endPoint.y);
+            ctx.lineWidth = 2;
+            ctx.strokeStyle = color;
+            ctx.stroke();
+        }
+
+        function drawWrist(x, y, color) {
+            ctx.beginPath();
+            ctx.arc(x, y, 15, 0, 2 * Math.PI);
+            ctx.fillStyle = color;
+            ctx.fill();
+            ctx.lineWidth = 3;
+            ctx.strokeStyle = 'black';
+            ctx.stroke();
+        }
+
+        async function init() {
+            try {
+                logInfo("Initialization started");
+                canvas = document.getElementById('output-canvas');
+                if (!canvas) {
+                    throw new Error("Canvas element not found");
+                }
+                logInfo("Canvas element found");
+
+                ctx = canvas.getContext('2d');
+                if (!ctx) {
+                    throw new Error("Unable to get 2D context from canvas");
+                }
+                logInfo("Canvas 2D context obtained");
+
+                canvas.width = 640;
+                canvas.height = 480;
+                logInfo("Canvas dimensions set");
+
+                corners = {
+                    'top-left': {x: 75, y: 75},
+                    'top-right': {x: canvas.width - 75, y: 75},
+                    'bottom-left': {x: 75, y: canvas.height - 75},
+                    'bottom-right': {x: canvas.width - 75, y: canvas.height - 75}
+                };
+                logInfo("Corners defined");
+
+                await setupCamera();
+                logInfo("Camera setup complete");
+
+                await loadPoseNet();
+                logInfo("PoseNet loaded");
+
+                generateQuestion();
+                logInfo("Question generated");
+
+                detectPose();
+                logInfo("Pose detection started");
+            } catch (error) {
+                logError(`Initialization failed: ${error.message}`);
+            }
+        }
+
+        // Wait for the DOM to load before initializing
+        window.addEventListener('DOMContentLoaded', () => {
+            logInfo("DOMContentLoaded event fired");
+            init();
+        });
+    </script>
+</body>
+</html>
